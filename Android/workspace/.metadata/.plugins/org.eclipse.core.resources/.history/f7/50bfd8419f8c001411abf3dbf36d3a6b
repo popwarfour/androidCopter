@@ -1,0 +1,390 @@
+/*
+ * Copyright (C) 2012 Paul Bovbel, paul@bovbel.com
+ * 
+ * This file is part of the Mover-Bot robot platform (http://code.google.com/p/mover-bot/)
+ * 
+ * Mover-Bot is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 3 of the License, or
+ * (at your option) any later version.
+ * 
+ * This source code is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with this source code. If not, see http://www.gnu.org/licenses/
+ */
+
+package com.example.arduinotest;
+
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.InputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.OutputStreamWriter;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.NetworkInterface;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.SocketAddress;
+import java.util.Collections;
+import java.util.List;
+
+import org.apache.http.conn.util.InetAddressUtils;
+
+
+import android.os.Handler;
+import android.os.Looper;
+import android.os.Message;
+import android.util.Log;
+
+/** Configures an IP connection and its input/output streams.
+ * 
+ * construct with port to create server and listen for clients
+ * construct with ip and port to connect to server as client
+ * 
+ * Call this.send to sent a byte array
+ * Override onReceive to process incoming bytes
+ */
+
+public abstract class RemoteControl extends Thread{
+
+	//Running Vars
+	public boolean connected = false;
+	boolean isServer = false;
+
+	ServerSocket controlServerSocket;
+	Socket controlSocket;
+
+	ServerSocket imageServerSocket;
+	public Socket imageSocket;
+
+	InputStream byteInputStream;
+	BufferedWriter output;
+	Handler controlSender;
+	Thread controlListener;
+	//Linkback to UI Thread
+	Handler UIHandler;
+
+	//Default Parameters
+	String controlIp = "10.0.1.5";
+	int controlPort = 9090;
+	int imagePort = 9095;
+
+	//Constants
+	public final String CLRF = "\r\n";
+	
+	public static String getIPAddress(boolean useIPv4) {
+        try {
+            List<NetworkInterface> interfaces = Collections.list(NetworkInterface.getNetworkInterfaces());
+            for (NetworkInterface intf : interfaces) {
+                List<InetAddress> addrs = Collections.list(intf.getInetAddresses());
+                for (InetAddress addr : addrs) {
+                    if (!addr.isLoopbackAddress()) {
+                        String sAddr = addr.getHostAddress().toUpperCase();
+                        boolean isIPv4 = InetAddressUtils.isIPv4Address(sAddr); 
+                        if (useIPv4) {
+                            if (isIPv4) 
+                                return sAddr;
+                        } else {
+                            if (!isIPv4) {
+                                int delim = sAddr.indexOf('%'); // drop ip6 port suffix
+                                return delim<0 ? sAddr : sAddr.substring(0, delim);
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Exception ex) { } // for now eat exceptions
+        return "";
+    }
+
+	protected RemoteControl(int port, Handler ui){
+
+		//Server setup: Load in listening port
+		super("RCServer");
+		//controlIp = getIPAddress(true);
+		isServer = true;
+		this.setDaemon(true);
+		controlPort = port;
+		imagePort = port + 5;
+		UIHandler = ui;
+		this.start();
+	}
+
+	protected RemoteControl(String ip, int port, Handler ui){
+
+		//Client setup: Load in target IP and Port
+		super("RCClient");
+		this.setDaemon(true);
+		controlIp = ip;
+		controlPort = port;
+		imagePort = port + 5;
+		UIHandler = ui;
+		this.start();
+	}
+
+	//send message to rover
+	public void send(String command){
+		if (controlSender != null){
+			Message msg = controlSender.obtainMessage();
+			msg.obj = command;
+			controlSender.sendMessage(msg);
+		}
+	}
+
+	//send messages to rover
+	public void send(String[] commands){
+		StringBuilder command = new StringBuilder();
+		for (String temp : commands){
+			command.append(temp + ";");
+		}
+		send(command.toString());
+	}
+
+	//Override to process incoming messages
+	public abstract void onReceive(Byte[] msg);
+
+	//Override to process debug messages
+	public abstract void onNotify(String msg);
+	
+	public abstract void onStart();
+
+	public abstract void onConnected();
+
+	public abstract void onDisconnected();
+
+	public abstract void onShutdown();
+
+	public void shutdown() throws IOException{
+		this.interrupt();
+		this.disconnect();
+		UIHandler.post(new Runnable() {
+			public void run() {
+				onShutdown();
+			}
+		});		
+	}
+
+	//Process messages from rover
+	private void receive(Byte[] commands)
+	{
+		onReceive(commands);
+		/*
+		for (String command : commands){
+			//check not empty command
+			if (command.matches(".*\\w.*")){
+				final String msg[] = command.split("=");
+				UIHandler.post(new Runnable() {
+					public void run() {
+						onReceive(msg);
+					}
+				});		
+
+			}
+		}*/
+	}
+
+	//Shutdown connection
+	public void disconnect() throws IOException{
+		if(controlSender !=null){
+			controlSender.getLooper().quit();
+			controlSender = null;
+		}
+		if(controlListener !=null){
+			controlListener.interrupt();
+			controlListener = null;
+		}
+		if(byteInputStream != null)
+		{
+			byteInputStream.close();
+			byteInputStream = null;
+		}
+		if(output !=null){
+			output.close();
+			output = null;
+		}	
+		if(controlSocket !=null){
+			controlSocket.close();
+			controlSocket = null;
+		}
+
+		connected = false;
+		UIHandler.post(new Runnable() {
+			public void run() {
+				onNotify("Wifi Disconnected\n");
+				onDisconnected();
+			}
+		});
+		
+		System.out.println("finished");
+	}
+
+	public void run() {
+		try {
+			while(!isInterrupted()){
+
+				if(isServer){
+					controlServerSocket = new ServerSocket(controlPort);
+					/*
+					SocketAddress temp = controlServerSocket.getLocalSocketAddress();
+					InetAddress temp2 = controlServerSocket.getInetAddress();
+					String temp3 = temp2.getHostAddress();
+					InetSocketAddress inetAddr = (InetSocketAddress)temp;
+					String temp4 = inetAddr.getAddress().getHostAddress();*/
+					//imageServerSocket = new ServerSocket(imagePort);
+					UIHandler.post(new Runnable() {
+						public void run() {
+							//String test = Util.getLocalIpAddress();
+							System.out.println("Listening on IP: " + Util.getLocalIpAddress() + ":" + controlPort + "\n"); 
+							onStart();
+						}
+					});	
+					controlSocket = controlServerSocket.accept();
+					//imageSocket = imageServerSocket.accept();
+				}else{
+					InetAddress controlAddr = InetAddress.getByName(controlIp);
+					controlSocket = new Socket(controlAddr, controlPort);
+					//imageSocket = new Socket(controlAddr, imagePort);
+				}
+				connected = controlSocket.isConnected();
+				if(connected){
+					UIHandler.post(new Runnable() {
+						public void run() {
+							onNotify("Connected to: " + controlSocket.getInetAddress().toString()  +"\n");
+							onConnected();
+						}
+					});					
+					//setup input
+					/*
+					BufferedReader input = new BufferedReader(new InputStreamReader(controlSocket.getInputStream()));
+					String line;
+					StringBuilder sb = new StringBuilder();
+					while ((line = input.readLine()) != null)
+					{
+					    if (line.equals("~~/START/~~"))
+					        sb = new StringBuilder();
+					    else if (line.equals("~~/END/~~"))
+					    {
+					    	receive(line.split(","));
+					        sb.delete(0, sb.length());
+					    }
+					    else
+					        sb.append(line);
+					}*/
+					
+					byteInputStream = controlSocket.getInputStream();
+					controlListener = new Thread(new Runnable()
+					{
+						boolean running = true;
+						
+						public void run()
+						{
+							String line = null;
+							while(running)
+							{
+								try
+								{
+									//Handle incoming messages, convert to ByteArray
+									ByteArrayOutputStream tempBuffer = new ByteArrayOutputStream();
+
+									int nRead;
+									byte[] data = new byte[16384];
+
+									while ((nRead = byteInputStream.read(data, 0, data.length)) != -1) {
+										tempBuffer.write(data, 0, nRead);
+									}
+
+									tempBuffer.flush();
+									
+									byte[] tempValues = tempBuffer.toByteArray();
+									
+									receive(tempValues);
+								}
+								catch (final Exception e)
+								{
+									
+									UIHandler.post(new Runnable()
+									{
+										public void run()
+										{
+											onNotify("Wifi Receive Failed " + e.toString() + "\n");
+										}
+									});
+									//running = false;
+								}
+							}
+						}
+					});
+					
+					controlListener.setDaemon(true);
+					controlListener.setName("RemoteControlClientListener");
+					controlListener.start();		
+
+					//setup output
+					output = new BufferedWriter(new OutputStreamWriter(controlSocket.getOutputStream()));
+					Looper.prepare();
+					controlSender = new Handler() {
+						public void handleMessage(Message msg) {
+							try{
+								//Handle outgoing messages
+								output.write((String)msg.obj + CLRF);
+								output.flush();
+								Thread.sleep(5);
+							}catch(final Exception e){
+
+								UIHandler.post(new Runnable() {
+									public void run() {
+										onNotify("Wifi Send Failed " + e.toString() + "\n");
+									}
+								});
+								this.getLooper().quit();
+							}						
+						}
+					};
+					Looper.loop();
+
+				}else{
+					throw new Exception("Server timed out");
+				}
+			}
+		}catch (final Exception e){
+			UIHandler.post(new Runnable() {
+				public void run() {
+					onNotify(e.getMessage() + "\n");
+				}
+			});
+		}finally{
+			//On client disconnect					
+			try {
+				disconnect();
+			} catch (IOException e) {
+			}
+		}
+
+
+		if(isServer){
+			//On server shutdown
+			try {
+				controlServerSocket.close();
+
+				UIHandler.post(new Runnable() {
+					public void run() {
+						onNotify("Server Shutdown\n");
+					}
+				});
+			} catch (final Exception e) {
+				UIHandler.post(new Runnable() {
+					public void run() {
+						onNotify("Error Closing Socket " + e.getMessage() + "\n");
+					}
+				});
+			}
+		}
+	}
+}

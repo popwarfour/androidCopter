@@ -1,0 +1,439 @@
+package com.example.arduinotest;
+
+import android.graphics.Bitmap;
+import android.graphics.Matrix;
+import android.hardware.SensorEvent;
+import android.os.Bundle;
+import android.os.Handler;
+import android.app.Activity;
+import android.util.Log;
+import android.view.Menu;
+import android.view.View;
+import android.widget.*;
+
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.nio.ByteBuffer;
+import java.util.List;
+
+import android.hardware.Camera;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
+import android.hardware.SensorManager;
+
+import java.nio.ByteBuffer;
+
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.PrintWriter;
+import java.lang.Character.*;
+
+
+
+
+public class MainActivity extends Activity implements SensorEventListener
+{
+	//Local Variables
+    float[] currentOrientation = new float[4];
+    float xOffset = 0;
+    float yOffset = 0;
+    private SensorManager sensorManager = null;
+    
+    ByteBuffer msg = ByteBuffer.allocate(16);
+	
+	//Protocol Messages Indexes
+	int SPEED = 0;
+	float GYRO_X = 0;
+	float GYRO_Y = 0;
+	float YAW = 0;
+	
+	String testMessage = null;
+	
+	//Network
+	private static String defaultIp="192.168.1.107";
+	public static final int controlPort = 9090;// DESIGNATE A PORT
+	private Handler UIHandler = new Handler();
+	private RemoteControlClient remoteClientConnection;
+	private RemoteControlServer remoteConnection;
+	
+    private ServerSocket ss; 
+    private Socket socket; 
+    private BufferedReader in; 
+    private PrintWriter out; 
+    
+    //Thread Communication Handeler
+  	final Handler serverHandeler = new Handler();
+
+	long timeMills = 0;
+
+	
+	public void packageDataAndSend()
+    {
+		// Create an empty ByteBuffer with a 10 byte capacity
+	    msg.putFloat((float)GYRO_X);
+	    msg.putFloat((float)GYRO_Y);
+	    msg.putFloat((float)YAW);
+	    msg.putInt((int)SPEED);
+	    msg.rewind();
+	    //float test = bbuf.getFloat();
+	    byte[] temp = msg.array();
+	    
+	    ByteBuffer buffer = ByteBuffer.wrap(temp);
+
+	    float first = buffer.getFloat();
+	    float second = buffer.getFloat();
+	    int third = buffer.getInt();
+	    int fourth = buffer.getInt();	    
+    }
+
+	@Override
+	protected void onCreate(Bundle savedInstanceState) {
+		super.onCreate(savedInstanceState);
+		setContentView(R.layout.activity_main);
+		
+		sensorManager = (SensorManager) getSystemService(SENSOR_SERVICE);
+		timeMills = System.currentTimeMillis();
+		
+		
+		//setup usb hard button
+		final Button powerOnServer = (Button) findViewById(R.id.turnOnServer);
+		powerOnServer.setOnClickListener(new View.OnClickListener()
+        {
+            public void onClick(View v)
+            {
+            	if(remoteConnection != null)
+            	{
+            		if(remoteConnection.connected)
+            		{
+                    	try {
+							remoteConnection.disconnect();
+						} catch (IOException e) {
+							// TODO Auto-generated catch block
+							e.printStackTrace();
+						}
+            		}
+            	}
+            	else
+            	{
+            		remoteConnection = new RemoteControlServer(controlPort, UIHandler);
+            	}
+            }
+        });
+		
+		//setup usb hard button
+		final Button connectToServer = (Button) findViewById(R.id.connectToServer);
+		connectToServer.setOnClickListener(new View.OnClickListener()
+        {
+            public void onClick(View v)
+            {
+            	//remoteConnection = new RemoteControlClient(defaultIp, controlPort, UIHandler);
+            	remoteClientConnection = new RemoteControlClient("192.168.1.107", controlPort, UIHandler);
+            }
+        });
+		
+		//setup usb hard button
+		final Button checkConnectionStatus = (Button) findViewById(R.id.checkConnectionStatus);
+		checkConnectionStatus.setOnClickListener(new View.OnClickListener()
+        {
+            public void onClick(View v)
+            {
+            	if(remoteConnection.connected)
+            	{
+            		TextView zValue = (TextView) findViewById(R.id.connectionStatus);
+      			  	zValue.setText("SERVER IS CONNECTED");
+            	}
+            	else
+            	{
+            		TextView zValue = (TextView) findViewById(R.id.connectionStatus);
+      			  	zValue.setText("SERVER IS NOT CONNECTED");
+            	}
+            }
+        });
+				
+		//setup usb hard button
+		final Button sendMessage = (Button) findViewById(R.id.sendMessage);
+		sendMessage.setOnClickListener(new View.OnClickListener()
+        {
+            public void onClick(View v)
+            {
+            	//remoteConnection = new RemoteControlClient(defaultIp, controlPort, UIHandler);
+            	if(remoteClientConnection.connected)
+            	{
+            		remoteClientConnection.send("MESSAGE TO SERVER");
+            	}
+            }
+        });
+	}
+
+	
+	// ------ SENSOR METHODS -----------
+	@Override
+	  public void onSensorChanged(SensorEvent event) {
+	    if(event.sensor.getType() == Sensor.TYPE_GYROSCOPE)
+	    {
+	    	getGryoscope(event);
+	    }
+	    else if(event.sensor.getType() == Sensor.TYPE_ORIENTATION)
+	    {
+	    	getAzimuth(event);
+	    	//getMagneticField(event);
+	    }
+	}
+	
+	private void getMagneticField(SensorEvent event)
+	{
+		float[] values = event.values;
+		
+		double radians = Math.atan(values[0]/values[1]); 
+		double degrees = Math.toDegrees(radians);
+		
+		if(values[0] < 0 && values[1] <= 0)
+		{
+			//R2
+			degrees = (90 - degrees) + 90;
+		}
+		else if(values[0] < 0 && values[1] > 0)
+		{
+			//R1	
+			degrees *= -1;
+		}
+		else if(values[0] >= 0 && values[1] < 0)
+		{
+			//R3
+			degrees = (90 - degrees) + 90;
+		}
+		else if(values[0] > 0 && values[1] >= 0)
+		{
+			//R4
+			degrees = (90 - degrees) + 270;
+		}
+		
+		TextView zValue = (TextView) findViewById(R.id.zLabel);
+		String degreeString = String.format("Degrees: %.1f | X: %.1f Y: %.1f", degrees, values[0], values[1]);
+	    zValue.setText(degreeString);
+	    
+	    YAW = (float)degrees;
+	    
+	    packageDataAndSend();
+	}
+	
+	private void getAzimuth(SensorEvent event)
+ 	{
+ 		YAW = (float)event.values[0];
+ 		
+ 		TextView zValue = (TextView) findViewById(R.id.zLabel);
+		String degreeString = String.format("" + YAW);
+	    zValue.setText(degreeString);
+ 		packageDataAndSend();
+ 	}
+	
+	private void getGryoscope(SensorEvent event) {
+	    float[] values = event.values;
+	    // Movement
+	    float x = values[0];
+	    float y = values[1];
+
+	    TextView xValue = (TextView) findViewById(R.id.xLabel);
+	    xValue.setText("" + x);
+	    
+	    TextView yValue = (TextView) findViewById(R.id.yLabel);
+	    yValue.setText("" + y);
+	    
+	    if(timeMills > 5000)
+       	{
+       		timeMills = System.currentTimeMillis();
+       		
+       		float tempX = (float)Math.round(x * 10);
+	       	float tempY = (float)Math.round(y * 10);
+	       	
+	       	GYRO_X = tempX;
+	       	GYRO_Y = tempY;
+	       	
+	       	packageDataAndSend();
+       	}
+	  }
+
+
+	  @Override
+	  public void onAccuracyChanged(Sensor sensor, int accuracy) {
+
+	  }
+	  
+	  public void updateMsgView(String msg)
+	  {
+		  TextView connectionStatus = (TextView) findViewById(R.id.connectionStatus);
+		  connectionStatus.setText("" + msg);
+		  /*
+		  if(msg.equals("yl"))
+		  {
+			  System.out.println("YAW LEFT");
+		  }
+		  else if(msg.equals("yr"))
+		  {
+			  System.out.println("YAW RIGHT");
+		  }
+		  else if(msg.equals("pf"))
+		  {
+			  System.out.println("PITCH FORWARD");
+		  }
+		  else if(msg.equals("pb"))
+		  {
+			  System.out.println("PITCH BACKWARD");
+		  }
+		  else if(msg.equals("rr"))
+		  {
+			  System.out.println("ROLL RIGHT");
+		  }
+		  else if(msg.equals("rl"))
+		  {
+			  System.out.println("ROLL LEFT");
+		  }
+		  else
+		  {
+			  String[] all = msg.split("=");
+			  System.out.println("THROTTLE: " + all[1]);
+		  }*/
+	  }
+	  
+
+	  // --------- NETWORKING CLIENT ----------
+	  private class RemoteControlServer extends RemoteControl
+	  {
+		  RemoteControlServer(int port, Handler ui)
+		  {
+			  super(port, ui);
+		  }
+		  
+		  public class BridgeThread implements Runnable
+		  {
+			  String[] msgArray = null;
+			  public BridgeThread(String[] msg)
+			  {
+				  msgArray = msg;
+			  }
+
+			  public void run()
+			  {
+				  runOnUiThread(new Runnable()
+				  {	
+					  @Override
+					  public void run()
+					  {
+						  TextView zValue = (TextView) findViewById(R.id.connectionStatus);
+						  zValue.setText(msgArray[0]);
+					  }
+				  });
+			  }
+		  }
+		 
+
+		  @Override
+		  public void onReceive(String[] msg)
+		  {
+			  BridgeThread bridgeTest = new BridgeThread(msg);
+			  bridgeTest.run();
+		  }
+
+		  @Override
+		  public void onNotify(String msg)
+		  {
+			  TextView zValue = (TextView) findViewById(R.id.connectionStatus);
+			  zValue.setText(msg);
+		  }
+			
+		  @Override
+		  public void onConnected()
+		  {
+			  TextView zValue = (TextView) findViewById(R.id.connectionStatus);
+			  zValue.setText("Connected To Server...");
+		  }
+
+		  @Override
+		  public void onDisconnected()
+		  {
+			  
+			  TextView zValue = (TextView) findViewById(R.id.connectionStatus);
+			  zValue.setText("Disconnected From Server...");
+		  }
+
+		  @Override
+		  public void onStart()
+		  {
+			  TextView zValue = (TextView) findViewById(R.id.connectionStatus);
+			  zValue.setText("Server Started...");
+		  }
+
+		  @Override
+		  public void onShutdown()
+		  {
+			  TextView zValue = (TextView) findViewById(R.id.connectionStatus);
+			  zValue.setText("Socket Shut Down...");
+		  }
+	  }
+	  
+	  private class RemoteControlClient extends RemoteControl
+	  {
+		  RemoteControlClient(String ip, int port, Handler ui)
+		  {
+			  super(ip, port, ui);
+			 
+			  //remoteClientConnection.send("TEST!");
+		  }
+
+		  @Override
+		  public void onReceive(String[] msg)
+		  {	
+			  
+		  }
+		
+		  @Override
+		  public void onNotify(String msg)
+		  {
+			  TextView zValue = (TextView) findViewById(R.id.connectionStatus);
+			  zValue.setText(msg);
+		  }
+		  
+		  @Override
+		  public void onConnected()
+		  {
+			  //remoteClientConnection.send("message");
+		  }
+		
+		  @Override
+		  public void onDisconnected()
+		  {
+			  TextView zValue = (TextView) findViewById(R.id.connectionStatus);
+			  zValue.setText("DISCONNECTED");
+		  }
+		
+		  @Override
+		  public void onStart()
+		  {
+			
+		  }
+		  @Override
+		  public void onShutdown()
+		  {
+			
+		  }
+	  }
+
+	  
+	  @Override
+	  protected void onResume() {
+	    super.onResume();
+	    // register this class as a listener for the orientation and
+	    // accelerometer sensors
+	    sensorManager.registerListener(this,sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE),SensorManager.SENSOR_DELAY_NORMAL);
+	    sensorManager.registerListener(this,sensorManager.getDefaultSensor(Sensor.TYPE_ORIENTATION),SensorManager.SENSOR_DELAY_NORMAL);
+	  }
+
+	  @Override
+	  protected void onPause() {
+	    // unregister listener
+	    super.onPause();
+	    sensorManager.unregisterListener(this);
+	  }
+}

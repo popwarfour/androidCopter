@@ -1,0 +1,6 @@
+INDEX VERSION 1.126+/Users/jordanrouille/Documents/androidCopter/workspace/.metadata/.plugins/org.eclipse.jdt.core
+2442754713.index
+1405615518.index
+2270971182.index
+3163384673.index
+1387593995.index
